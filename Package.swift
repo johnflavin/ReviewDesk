@@ -1,5 +1,5 @@
 // swift-tools-version:6.0
-// Lets Xcode or `swift build` open the project. build.sh is what produces the .app bundle.
+// build.sh builds this and wraps the executable in an .app bundle.
 import PackageDescription
 
 let package = Package(
