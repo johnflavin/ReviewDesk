@@ -37,7 +37,7 @@ struct PRDetailView: View {
                 if let binding = model.binding(for: review.id) {
                     DraftEditor(review: binding)
                 }
-            case .posted, .dismissed:
+            case .pending, .posted, .dismissed:
                 FinishedView(review: review, pr: item.pr)
             case .failed:
                 FailedView(review: review, pr: item.pr)
@@ -279,13 +279,13 @@ struct RunningView: View {
 struct FinishedView: View {
     let review: Review
     let pr: PullRequest
+    @State private var copied = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Image(systemName: review.status == .posted ? "checkmark.circle.fill" : "xmark.circle")
-                        .foregroundStyle(review.status == .posted ? .green : .secondary)
+                    statusIcon
                         .font(.title3)
                     Text(statusText)
                         .font(.headline)
@@ -294,8 +294,22 @@ struct FinishedView: View {
                     ReviewAgainButton(pr: pr)
                         .fixedSize()
                 }
-                if let url = review.postedURL.flatMap({ URL(string: $0) }) {
-                    Link("Open on GitHub", destination: url)
+                if let url = gitHubURL {
+                    HStack(spacing: 16) {
+                        Link("Open on GitHub", destination: url)
+                        if pending {
+                            Button(copied ? "Copied" : "Copy Summary") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(review.onGitHub?.body ?? review.postedBody ?? review.summary, forType: .string)
+                                copied = true
+                            }
+                        }
+                    }
+                }
+                if pending {
+                    Text("GitHub doesn't show the summary of a pending review, and drops it when you submit from the web. Paste it into the Submit review box.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let note = review.postedNote {
                     Text(note).foregroundStyle(.secondary)
@@ -305,14 +319,33 @@ struct FinishedView: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .onChange(of: review.id) { copied = false }
+    }
+
+    private var pending: Bool { review.status == .pending }
+
+    /// A pending review has no page of its own, so its link is the pull request's changes, where it can be submitted.
+    private var gitHubURL: URL? {
+        if pending { return URL(string: pr.url + "/files") }
+        guard review.status == .posted else { return nil }
+        return review.postedURL.flatMap { URL(string: $0) }
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch review.status {
+        case .pending: Image(systemName: "paperplane.fill").foregroundStyle(.blue)
+        case .posted: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        default: Image(systemName: "xmark.circle").foregroundStyle(.secondary)
+        }
     }
 
     private var statusText: String {
-        guard review.status == .posted else { return "Discarded" }
-        guard let event = review.postedEvent else {
-            return "Sent to GitHub as a pending review. Finish and submit it there."
+        switch review.status {
+        case .pending: return "Pending on GitHub"
+        case .posted: return review.postedEvent.map { "Posted (\($0.label.lowercased()))" } ?? "Posted"
+        default: return "Discarded"
         }
-        return "Posted (\(event.label.lowercased()))"
     }
 }
 
@@ -331,24 +364,51 @@ struct FailedView: View {
     }
 }
 
+/// The review as it is on GitHub once synced from there, or else as drafted.
 struct ReviewReadOnly: View {
     let review: Review
 
     var body: some View {
+        let repo = review.pr.key.slug
         VStack(alignment: .leading, spacing: 14) {
-            MarkdownPreview(text: review.summary, repo: review.pr.key.slug)
-            ForEach(review.comments.filter(\.include)) { comment in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        SeverityBadge(severity: comment.severity)
-                        Link(comment.location, destination: comment.blobURL(review.pr))
-                            .font(.callout.monospaced())
-                    }
-                    MarkdownPreview(text: comment.body, repo: review.pr.key.slug)
+            if let posted = review.onGitHub {
+                if posted.body.isEmpty {
+                    Text("No summary").foregroundStyle(.secondary)
+                } else {
+                    MarkdownPreview(text: posted.body, repo: repo)
                 }
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+                ForEach(posted.comments, id: \.url) { comment in
+                    PostedCommentCard(location: comment.location, url: URL(string: comment.url) ?? review.pr.key.webURL,
+                                text: comment.body, repo: repo)
+                }
+            } else {
+                MarkdownPreview(text: review.summary, repo: repo)
+                ForEach(review.comments.filter(\.include)) { comment in
+                    PostedCommentCard(severity: comment.severity, location: comment.location, url: comment.blobURL(review.pr),
+                                text: comment.body, repo: repo)
+                }
             }
         }
+    }
+}
+
+private struct PostedCommentCard: View {
+    var severity: Severity?
+    let location: String
+    let url: URL
+    let text: String
+    let repo: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                if let severity { SeverityBadge(severity: severity) }
+                Link(location, destination: url)
+                    .font(.callout.monospaced())
+            }
+            MarkdownPreview(text: text, repo: repo)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
     }
 }

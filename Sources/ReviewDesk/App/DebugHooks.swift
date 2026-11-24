@@ -2,7 +2,7 @@ import AppKit
 
 /// Lets scripts drive the UI for testing. Only active when launched with REVIEWDESK_DEBUG=1.
 /// Post the distributed notification "app.reviewdesk.debug" with userInfo keys:
-/// "select" (a PR id), "settings" ("open"), and "snapshot" (a PNG path; optional "window" title).
+/// "select" (a PR id), "settings" ("open"), "snapshot" (a PNG path; optional "window" title), and "post".
 @MainActor
 enum DebugHooks {
     static func install(model: AppModel) {
@@ -46,6 +46,10 @@ enum DebugHooks {
                 if let text = info["discuss"], let id = model.selection, let review = model.item(id)?.latest {
                     UserDefaults.standard.set(true, forKey: "showDiscussion")
                     model.discuss(review.id, message: text)
+                }
+                // "pending", or an event such as "COMMENT". Posts to GitHub.
+                if let how = info["post"], let id = model.selection, let review = model.item(id)?.latest {
+                    model.post(review.id, event: ReviewEvent(rawValue: how))
                 }
                 if let path = info["keychainTest"] {
                     Task {

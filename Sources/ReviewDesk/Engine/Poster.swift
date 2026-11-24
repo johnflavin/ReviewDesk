@@ -2,6 +2,9 @@ import Foundation
 
 struct PostOutcome: Sendable {
     var url: String?
+    var reviewID: String?
+    /// The review body as sent.
+    var body: String
     var note: String?
 }
 
@@ -39,12 +42,13 @@ enum Poster {
     static func post(_ review: Review, event: ReviewEvent?, footer: String, github: GitHub) async throws -> PostOutcome {
         let first = payload(for: review, event: event, footer: footer)
         do {
-            let url = try await github.submitReview(review.pr.key, payload: JSONSerialization.data(withJSONObject: first))
-            return PostOutcome(url: url)
+            let posted = try await github.submitReview(review.pr.key, payload: JSONSerialization.data(withJSONObject: first))
+            return PostOutcome(url: posted.url, reviewID: posted.nodeID, body: first["body"] as? String ?? "")
         } catch let error as GitHubError where error.unprocessable && !((first["comments"] as? [Any])?.isEmpty ?? true) {
             let fallback = payload(for: review, event: event, footer: footer, inline: false)
-            let url = try await github.submitReview(review.pr.key, payload: JSONSerialization.data(withJSONObject: fallback))
-            return PostOutcome(url: url, note: "GitHub rejected the inline comments (\(error.message)), so they were posted in the review body instead.")
+            let posted = try await github.submitReview(review.pr.key, payload: JSONSerialization.data(withJSONObject: fallback))
+            return PostOutcome(url: posted.url, reviewID: posted.nodeID, body: fallback["body"] as? String ?? "",
+                               note: "GitHub rejected the inline comments (\(error.message)), so they were posted in the review body instead.")
         }
     }
 }

@@ -1,13 +1,14 @@
 import SwiftUI
 
 enum PRSection: Int, CaseIterable, Identifiable {
-    case drafts, inProgress, toReview, added, watching, done, ignored
+    case drafts, pending, inProgress, toReview, added, watching, done, ignored
 
     var id: Int { rawValue }
 
     var title: String {
         switch self {
         case .drafts: "Drafts to post"
+        case .pending: "Pending on GitHub"
         case .inProgress: "Reviewing"
         case .toReview: "Review requested"
         case .added: "Added by you"
@@ -38,10 +39,10 @@ struct PRItem: Identifiable {
 
     var outdated: Bool { latest.map { $0.pr.headSha != pr.headSha } ?? false }
 
-    /// Requested and watched pull requests can be ignored unless a review of them is running or waiting to be posted.
+    /// Requested and watched pull requests can be ignored unless a review of them is running or waiting to be posted or submitted.
     var canIgnore: Bool {
         (source == .requested || source == .watched)
-            && (latest.map { !$0.status.isActive && $0.status != .drafted } ?? true)
+            && (latest.map { !$0.status.isActive && !$0.status.isUnsent } ?? true)
     }
 
     private var openSection: PRSection? {
@@ -58,6 +59,7 @@ struct PRItem: Identifiable {
         guard let latest else { return openSection ?? .done }
         if latest.status.isActive { return .inProgress }
         if latest.status == .drafted { return .drafts }
+        if latest.status == .pending { return .pending }
         if let open = openSection, latest.status == .failed || outdated { return open }
         return .done
     }
@@ -338,6 +340,7 @@ final class AppModel {
             for id in ignored.keys where !current.contains(id) { ignored[id] = nil }
         }
         await showRequestsMadeAgain(github: github, viewer: listing.viewer)
+        await syncPendingReviews(github: github)
         handleArrivals(prune: complete)
         pollError = complete ? nil : listing.warnings.joined(separator: "\n")
         autoQueue()
@@ -441,10 +444,32 @@ final class AppModel {
             }
             if policy[\.skipDraftPRs] && pr.isDraft { continue }
             let existing = reviews.filter { $0.pr.key == pr.key }
-            if existing.contains(where: { $0.status.isActive || $0.status == .drafted }) { continue }
+            if existing.contains(where: { $0.status.isActive || $0.status.isUnsent }) { continue }
             if existing.contains(where: { $0.pr.headSha == pr.headSha }) { continue }
             if !existing.isEmpty && !policy[\.reReviewOnPush] { continue }
             startReview(pr, options: policy.options(automatic: true), automatic: true)
+        }
+    }
+
+    /// Picks up edits, submission or deletion on GitHub of reviews sent as pending.
+    private func syncPendingReviews(github: GitHub) async {
+        for review in reviews where review.status == .pending {
+            do {
+                var nodeID = review.postedReviewID
+                if nodeID == nil, let url = review.postedURL {
+                    nodeID = try await github.reviewNodeID(review.pr.key, url: url)
+                }
+                guard let nodeID else { continue }
+                let posted = try await github.postedReview(review.pr.key, nodeID: nodeID)
+                guard posted == nil || posted != review.onGitHub || review.postedReviewID == nil else { continue }
+                update(review.id) {
+                    guard $0.status == .pending else { return }
+                    $0.postedReviewID = nodeID
+                    $0.sync(posted)
+                }
+            } catch {
+                continue
+            }
         }
     }
 
@@ -584,8 +609,10 @@ final class AppModel {
                 let credentials = try await GitHubCredentials.resolve(settings)
                 let outcome = try await Poster.post(review, event: event, footer: footer, github: GitHub(credentials: credentials))
                 update(id) {
-                    $0.status = .posted
+                    $0.status = event == nil ? .pending : .posted
                     $0.postedURL = outcome.url
+                    $0.postedReviewID = outcome.reviewID
+                    $0.postedBody = outcome.body
                     $0.postedEvent = event
                     $0.postedNote = outcome.note
                 }
@@ -803,6 +830,9 @@ final class AppModel {
             case .posting:
                 reviews[i].status = .drafted
                 reviews[i].error = "Posting was interrupted. Check GitHub before posting again."
+            case .posted where reviews[i].postedEvent == nil && reviews[i].onGitHub == nil:
+                // Sent as pending by a version without the pending status.
+                reviews[i].status = .pending
             default:
                 break
             }
@@ -865,7 +895,7 @@ final class AppModel {
     }
 
     private func updateBadge() {
-        let count = items.filter { $0.section == .drafts || ($0.unread && $0.section != .ignored) }.count
+        let count = items.filter { $0.section == .drafts || $0.section == .pending || ($0.unread && $0.section != .ignored) }.count
         NSApplication.shared.dockTile.badgeLabel = count > 0 ? "\(count)" : nil
     }
 }

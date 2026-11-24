@@ -231,15 +231,46 @@ struct GitHub: Sendable {
     }
 
     /// Creates a review. Without an `event` in the payload, GitHub leaves it pending for the user to submit.
-    func submitReview(_ key: PRKey, payload: Data) async throws -> String? {
-        guard let token = credentials.token(for: key.owner) else {
-            throw GitHubError(message: "No GitHub token is set up for \(key.owner). Add one in Settings → GitHub.")
-        }
+    func submitReview(_ key: PRKey, payload: Data) async throws -> (url: String?, nodeID: String?) {
+        let token = try reviewToken(key)
         let (data, response) = try await Self.send("POST", url: Self.url("repos/\(key.slug)/pulls/\(key.number)/reviews"),
                                                    token: token, body: payload)
         try Self.check(response, data)
         let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return object?["html_url"] as? String
+        return (object?["html_url"] as? String, object?["node_id"] as? String)
+    }
+
+    /// A review as it is now on GitHub, or nil if it was deleted.
+    func postedReview(_ key: PRKey, nodeID: String) async throws -> PostedReview? {
+        let query = """
+            query($id: ID!) { node(id: $id) { ... on PullRequestReview {
+              state body url comments(first: 100) { nodes { path line startLine body url } }
+            } } }
+            """
+        let body = try JSONSerialization.data(withJSONObject: ["query": query, "variables": ["id": nodeID]])
+        let (data, response) = try await Self.send("POST", url: Self.url("graphql"), token: try reviewToken(key), body: body)
+        try Self.check(response, data)
+        let result = try JSONDecoder().decode(ReviewQuery.self, from: data)
+        if let node = result.data?.node {
+            return PostedReview(state: node.state, body: node.body, url: node.url, comments: node.comments.nodes)
+        }
+        if result.errors?.contains(where: { $0.type == "NOT_FOUND" }) == true { return nil }
+        throw GitHubError(message: result.errors?.first?.message ?? "Unexpected response from GitHub.")
+    }
+
+    /// The node ID of the review a `#pullrequestreview-` URL points to.
+    func reviewNodeID(_ key: PRKey, url: String) async throws -> String? {
+        guard let id = url.components(separatedBy: "#pullrequestreview-").last.flatMap({ Int($0) }) else { return nil }
+        struct Review: Decodable { let node_id: String }
+        let data = try await get("repos/\(key.slug)/pulls/\(key.number)/reviews/\(id)", token: try reviewToken(key))
+        return try JSONDecoder().decode(Review.self, from: data).node_id
+    }
+
+    private func reviewToken(_ key: PRKey) throws -> String {
+        guard let token = credentials.token(for: key.owner) else {
+            throw GitHubError(message: "No GitHub token is set up for \(key.owner). Add one in Settings → GitHub.")
+        }
+        return token
     }
 
     /// Whether the token works, and a short description of what it can see or why it doesn't work.
@@ -396,6 +427,24 @@ private actor ETagCache {
 // MARK: - Response shapes
 
 private struct Login: Decodable { let login: String }
+
+private struct ReviewQuery: Decodable {
+    let data: Result?
+    let errors: [Failure]?
+
+    struct Result: Decodable { let node: Node? }
+    struct Node: Decodable {
+        let state: String
+        let body: String
+        let url: String
+        let comments: Comments
+    }
+    struct Comments: Decodable { let nodes: [PostedReview.Comment] }
+    struct Failure: Decodable {
+        let type: String?
+        let message: String
+    }
+}
 
 private struct IssueEvent: Decodable {
     let event: String

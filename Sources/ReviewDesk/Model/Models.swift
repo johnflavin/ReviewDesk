@@ -58,9 +58,12 @@ struct PullRequest: Codable, Hashable, Sendable, Identifiable {
 }
 
 enum ReviewStatus: String, Codable, Sendable {
-    case queued, preparing, running, drafted, posting, posted, failed, dismissed
+    /// `pending` is on GitHub but not yet submitted; `posted` is submitted.
+    case queued, preparing, running, drafted, posting, pending, posted, failed, dismissed
 
     var isActive: Bool { [.queued, .preparing, .running, .posting].contains(self) }
+    /// Drafted here or pending on GitHub, waiting for me to post or submit it.
+    var isUnsent: Bool { self == .drafted || self == .pending }
 
     var label: String {
         switch self {
@@ -69,6 +72,7 @@ enum ReviewStatus: String, Codable, Sendable {
         case .running: "Reviewing"
         case .drafted: "Draft ready"
         case .posting: "Posting"
+        case .pending: "Pending on GitHub"
         case .posted: "Posted"
         case .failed: "Failed"
         case .dismissed: "Discarded"
@@ -95,6 +99,16 @@ enum ReviewEvent: String, Codable, CaseIterable, Identifiable, Sendable {
         case .comment: "Comment"
         case .approve: "Approve"
         case .requestChanges: "Request changes"
+        }
+    }
+
+    /// From a submitted review's GitHub state; nil for a dismissed review.
+    init?(reviewState: String) {
+        switch reviewState {
+        case "APPROVED": self = .approve
+        case "CHANGES_REQUESTED": self = .requestChanges
+        case "COMMENTED": self = .comment
+        default: return nil
         }
     }
 
@@ -137,6 +151,30 @@ struct DraftComment: Codable, Identifiable, Hashable, Sendable {
         return URL(string: "https://github.com/\(pr.key.slug)/blob/\(pr.headSha)/\(encodedPath)\(anchor)")
             ?? pr.key.webURL
     }
+}
+
+/// A review as it is on GitHub, where it may have been edited or submitted.
+struct PostedReview: Codable, Hashable, Sendable {
+    struct Comment: Codable, Hashable, Sendable {
+        var path: String
+        /// Nil for a comment on the whole file.
+        var line: Int?
+        var startLine: Int?
+        var body: String
+        var url: String
+
+        var location: String {
+            guard let line else { return path }
+            if let startLine { return "\(path):\(startLine)-\(line)" }
+            return "\(path):\(line)"
+        }
+    }
+
+    /// PENDING, COMMENTED, APPROVED, CHANGES_REQUESTED or DISMISSED.
+    var state: String
+    var body: String
+    var url: String
+    var comments: [Comment]
 }
 
 struct LogEntry: Codable, Hashable, Sendable, Identifiable {
@@ -216,8 +254,13 @@ struct Review: Codable, Identifiable, Sendable {
     var log: [LogEntry] = []
     var error: String?
     var postedURL: String?
+    /// GitHub's node ID for the review.
+    var postedReviewID: String?
+    var postedBody: String?
     var postedEvent: ReviewEvent?
     var postedNote: String?
+    /// The review as last seen on GitHub, for reviews sent as pending.
+    var onGitHub: PostedReview?
     @DefaultEmpty var conversation: [ChatMessage] = []
     /// The draft before the last change Claude or draft.json made, for undo.
     var previousDraft: DraftFile?
@@ -251,5 +294,20 @@ struct Review: Codable, Identifiable, Sendable {
         comments = result.output.comments
         costUSD = result.output.costUSD
         sessionID = result.output.sessionID
+    }
+
+    /// Updates a pending review from GitHub, where it may have been edited, submitted or deleted.
+    mutating func sync(_ posted: PostedReview?) {
+        guard let posted else {
+            status = .dismissed
+            postedNote = "The pending review was deleted on GitHub."
+            return
+        }
+        onGitHub = posted
+        postedURL = posted.url
+        if posted.state != "PENDING" {
+            status = .posted
+            postedEvent = ReviewEvent(reviewState: posted.state)
+        }
     }
 }

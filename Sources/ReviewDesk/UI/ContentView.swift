@@ -224,6 +224,9 @@ struct StatusIcon: View {
             ProgressView().controlSize(.mini)
         case .drafted?:
             Image(systemName: "doc.text.fill").foregroundStyle(.orange)
+        case .pending?:
+            Image(systemName: "paperplane.fill").foregroundStyle(.blue)
+                .help("Pending on GitHub")
         case .posted?:
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
         case .dismissed?:
